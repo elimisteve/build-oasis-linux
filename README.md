@@ -11,6 +11,10 @@ Oasis is a small, statically-linked Linux distribution built on musl libc, BearS
 sudo apt-get install -y lua5.1 bison flex nasm bc ninja-build xz-utils \
     libwayland-dev curl git cpio gzip build-essential
 
+# Clone and build
+git clone https://github.com/elimisteve/build-oasis-linux.git
+cd build-oasis-linux
+
 # Build core system (console only)
 ./build-oasis.sh
 
