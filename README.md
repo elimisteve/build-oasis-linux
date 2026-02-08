@@ -1,8 +1,9 @@
 # build-oasis-linux
 
-Automated build script that compiles [Oasis Linux](https://github.com/oasislinux/oasis) from source and produces a bootable QEMU image.
+Automated build script that compiles [Oasis Linux](https://github.com/oasislinux/oasis) from source and produces a bootable QEMU image and ISO.
 
 Oasis is a small, statically-linked Linux distribution built on musl libc, BearSSL, oksh, and Wayland -- no glibc, no OpenSSL, no bash, no systemd, no Xorg.
+
 
 ## Quick Start
 
@@ -27,6 +28,7 @@ cd build-oasis-linux
 
 Build output goes to `./oasis-linux/` by default (next to the script).
 
+
 ## Running
 
 ```bash
@@ -46,6 +48,7 @@ To exit: type `exit` in the shell (or `Mod+Shift+Q` in velox). The VM will power
 
 In serial mode, you can also press `Ctrl+A` then `X` to kill QEMU directly.
 
+
 ## What It Does
 
 The build script handles everything automatically:
@@ -58,12 +61,15 @@ The build script handles everything automatically:
 6. Packages everything into an initramfs
 7. Creates a QEMU launch script
 
-## Build Modes
 
-| Flag | Packages | Use Case |
-|------|----------|----------|
-| *(none)* | core (32 packages) | Minimal console system |
-| `--desktop` | core + desktop + extra + media (70+ packages) | Full graphical desktop |
+## Build Options
+
+| Command | Effect |
+|---------|--------|
+| `./build-oasis.sh` | Core system (32 packages), console only |
+| `./build-oasis.sh --desktop` | Adds desktop + extra + media (70+ packages) |
+| `./build-oasis.sh iso` | Packages an existing build into a bootable `.iso` |
+
 
 ### Desktop Includes
 
@@ -76,6 +82,7 @@ The build script handles everything automatically:
 - **vis** -- text editor (vim-like)
 - Fonts (Adobe Source, Terminus)
 
+
 ## Build Fixes Applied Automatically
 
 The Oasis build has several issues when building from a fresh clone. This script handles all of them:
@@ -86,6 +93,30 @@ The Oasis build has several issues when building from a fresh clone. This script
 - **Host tool PATH** -- tools like `zic` are built during the build and need to be in PATH for later steps
 - **Dirty submodule index / rebase-apply leftovers** -- automatically cleaned and reinitialized
 
+
+## Bootable ISO
+
+The `iso` command packages an existing build into a bootable ISO. Run it
+after building:
+
+```bash
+./build-oasis.sh                    # build first
+./build-oasis.sh iso                # then create ISO
+# Output: oasis-linux/oasis-linux.iso
+```
+
+This just wraps the already-built kernel and initramfs with an isolinux
+bootloader -- it takes seconds, not minutes. The ISO is a hybrid image
+that boots from both CD/DVD and USB:
+
+```bash
+# Write to USB stick (replace /dev/sdX with your device)
+sudo dd if=oasis-linux/oasis-linux.iso of=/dev/sdX bs=1M status=progress
+```
+
+Or burn to a CD/DVD, or boot it directly in any VM (VirtualBox, VMware, etc.).
+
+
 ## Requirements
 
 - Linux x86_64
@@ -93,3 +124,4 @@ The Oasis build has several issues when building from a fresh clone. This script
 - ~15-30 minutes build time (depending on CPU and network)
 - QEMU for running the image (`qemu-system-x86_64`)
 - KVM recommended for performance (`/dev/kvm`)
+- For `iso` command: `xorriso`, `isolinux`, `syslinux-common`

@@ -9,27 +9,39 @@
 #   sudo apt-get install -y lua5.1 bison flex nasm bc ninja-build xz-utils libwayland-dev curl git cpio gzip build-essential
 #
 # Usage:
-#   ./build-oasis.sh [--desktop] [BUILD_DIR]
+#   ./build-oasis.sh [--desktop] [BUILD_DIR]    Build from source
+#   ./build-oasis.sh iso [BUILD_DIR]            Create .iso from existing build
 #
 # Options:
 #   --desktop    Include graphical desktop (velox WM, st terminal, netsurf browser)
 #   BUILD_DIR    Where to build (default: ./oasis-linux, next to this script)
 #
+# The build produces QEMU-ready files. To also get a bootable .iso (for
+# USB sticks, CDs, or other VMs), run the "iso" command afterward:
+#
+#   ./build-oasis.sh                  # build
+#   ./build-oasis.sh iso              # package into .iso
+#
 # The script will create:
-#   BUILD_DIR/qemu/bzImage         - Linux kernel
+#   BUILD_DIR/qemu/bzImage          - Linux kernel
 #   BUILD_DIR/qemu/initramfs.img.gz - Root filesystem
-#   BUILD_DIR/qemu/run             - QEMU launch script
+#   BUILD_DIR/qemu/run              - QEMU launch script
+#   BUILD_DIR/oasis-linux.iso       - Bootable ISO (via "iso" command)
 #
 
 set -e
 
 # Parse flags
 DESKTOP_MODE=false
+ISO_COMMAND=false
 BUILD_DIR=""
 for arg in "$@"; do
     case "$arg" in
         --desktop)
             DESKTOP_MODE=true
+            ;;
+        iso)
+            ISO_COMMAND=true
             ;;
         *)
             BUILD_DIR="$arg"
@@ -665,9 +677,9 @@ This directory contains a bootable Oasis Linux system for QEMU.
 
 ## Files
 
-- `bzImage` - Linux kernel
+- `bzImage`          - Linux kernel
 - `initramfs.img.gz` - Root filesystem (initramfs)
-- `run` - QEMU launch script
+- `run`              - QEMU launch script
 
 ## Usage
 
@@ -705,8 +717,85 @@ Build fixes applied:
 README_EOF
 }
 
+# Create bootable ISO image from existing build
+create_iso() {
+    # Check that a build exists
+    if [ ! -f "$BUILD_DIR/qemu/bzImage" ] || [ ! -f "$BUILD_DIR/qemu/initramfs.img.gz" ]; then
+        log_error "No build found at $BUILD_DIR/qemu/"
+        log_error "Run './build-oasis.sh' first, then './build-oasis.sh iso'"
+        exit 1
+    fi
+
+    # Check ISO prerequisites
+    local missing=()
+    if ! command -v xorriso &> /dev/null; then
+        missing+=("xorriso")
+    fi
+    if [ ! -f /usr/lib/ISOLINUX/isolinux.bin ]; then
+        missing+=("isolinux")
+    fi
+    if [ ! -f /usr/lib/syslinux/modules/bios/ldlinux.c32 ]; then
+        missing+=("syslinux-common")
+    fi
+    if [ ${#missing[@]} -ne 0 ]; then
+        log_error "Missing ISO tools: ${missing[*]}"
+        log_error "Install with: sudo apt-get install -y xorriso isolinux syslinux-common"
+        exit 1
+    fi
+
+    log_info "Creating bootable ISO from $BUILD_DIR/qemu/ ..."
+
+    local iso_dir="$BUILD_DIR/iso"
+    rm -rf "$iso_dir"
+    mkdir -p "$iso_dir/boot/isolinux"
+
+    # Copy kernel and initramfs
+    cp "$BUILD_DIR/qemu/bzImage" "$iso_dir/boot/"
+    cp "$BUILD_DIR/qemu/initramfs.img.gz" "$iso_dir/boot/"
+
+    # Copy isolinux bootloader files
+    cp /usr/lib/ISOLINUX/isolinux.bin "$iso_dir/boot/isolinux/"
+    cp /usr/lib/syslinux/modules/bios/ldlinux.c32 "$iso_dir/boot/isolinux/"
+
+    # Create isolinux config
+    if [ "$DESKTOP_MODE" = "true" ]; then
+        local append_desktop="oasis.desktop"
+    else
+        local append_desktop=""
+    fi
+
+    cat > "$iso_dir/boot/isolinux/isolinux.cfg" << ISOCFG
+DEFAULT oasis
+LABEL oasis
+    KERNEL /boot/bzImage
+    INITRD /boot/initramfs.img.gz
+    APPEND rdinit=/init $append_desktop
+ISOCFG
+
+    # Build the ISO (hybrid: boots from both CD and USB)
+    local iso_out="$BUILD_DIR/oasis-linux.iso"
+    xorriso -as mkisofs \
+        -o "$iso_out" \
+        -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+        -c boot/isolinux/boot.cat \
+        -b boot/isolinux/isolinux.bin \
+        -no-emul-boot \
+        -boot-load-size 4 \
+        -boot-info-table \
+        "$iso_dir"
+
+    local iso_size=$(du -h "$iso_out" | cut -f1)
+    log_info "ISO created: $iso_out ($iso_size)"
+}
+
 # Main build process
 main() {
+    # Handle "iso" as a standalone command
+    if [ "$ISO_COMMAND" = "true" ]; then
+        create_iso
+        return
+    fi
+
     log_info "============================================"
     log_info "Starting Oasis Linux build..."
     log_info "Build directory: $BUILD_DIR"
@@ -740,10 +829,13 @@ main() {
     log_info "  ./run -c      # Graphical console (no WM)"
     log_info "  ./run -s      # Serial console (no graphics)"
     log_info ""
+    log_info "To create a bootable ISO (for USB sticks, CDs, other VMs):"
+    log_info "  ./build-oasis.sh iso"
+    log_info ""
     log_info "Files created:"
-    log_info "  $BUILD_DIR/qemu/bzImage         - Linux kernel"
+    log_info "  $BUILD_DIR/qemu/bzImage          - Linux kernel"
     log_info "  $BUILD_DIR/qemu/initramfs.img.gz - Root filesystem"
-    log_info "  $BUILD_DIR/qemu/run             - QEMU launcher"
+    log_info "  $BUILD_DIR/qemu/run              - QEMU launcher"
     log_info ""
 }
 
