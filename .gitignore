@@ -1,0 +1,22 @@
+# Default build output directory
+oasis-linux/
+
+# Build artifacts (if script is run from repo root with custom paths)
+src/
+toolchain/
+kernel/
+rootfs/
+qemu/
+x86_64-linux-musl-cross/
+x86_64-linux-musl-cross.tgz
+
+# Test/build directories
+fresh-build/
+fresh-test/
+test-build/
+
+# Logs
+*.log
+
+# Claude Code
+.claude/
