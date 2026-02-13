@@ -68,6 +68,8 @@ The build script handles everything automatically:
 |---------|--------|
 | `./build-oasis.sh` | Core system (32 packages), console only |
 | `./build-oasis.sh --desktop` | Adds desktop + extra + media (70+ packages) |
+| `./build-oasis.sh --customize` | Generate core config files for editing, then exit |
+| `./build-oasis.sh --customize --desktop` | Generate desktop config files for editing, then exit |
 | `./build-oasis.sh iso` | Packages an existing build into a bootable `.iso` |
 
 
@@ -81,6 +83,40 @@ The build script handles everything automatically:
 - **mpv** -- media player
 - **vis** -- text editor (vim-like)
 - Fonts (Adobe Source, Terminus)
+
+
+## Customizing
+
+Config files live in `BUILD_DIR/config/` and are preserved across rebuilds. On the first build, defaults are generated automatically. Edit them any time; your changes will be used on subsequent builds.
+
+| File | Controls |
+|------|----------|
+| `config/config.lua` | Package sets, compiler flags, build options |
+| `config/init` | Init script that runs at boot |
+| `config/run` | QEMU launch script |
+| `config/isolinux.cfg` | ISO bootloader config |
+
+**`--desktop` and `--customize` interaction:** The `--desktop` flag only affects the
+*initial defaults* that get generated. Once a config file exists, `--desktop` is
+ignored for that file — your edits take precedence. To switch between core and
+desktop defaults, delete `config/` and regenerate.
+
+```bash
+# Customize a core build
+./build-oasis.sh --customize                  # generates core defaults, exits
+nano oasis-linux/config/config.lua            # edit what you want
+./build-oasis.sh                              # builds using your customizations
+
+# Customize a desktop build
+./build-oasis.sh --customize --desktop        # generates desktop defaults, exits
+nano oasis-linux/config/config.lua            # edit what you want
+./build-oasis.sh                              # builds using your customizations
+
+# Or customize after first build (also works)
+./build-oasis.sh --desktop                    # first build, generates desktop defaults
+nano oasis-linux/config/config.lua            # edit what you want
+./build-oasis.sh                              # rebuilds, preserves your edits
+```
 
 
 ## Build Fixes Applied Automatically

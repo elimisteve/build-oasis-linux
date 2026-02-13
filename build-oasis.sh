@@ -9,12 +9,18 @@
 #   sudo apt-get install -y lua5.1 bison flex nasm bc ninja-build xz-utils libwayland-dev curl git cpio gzip build-essential
 #
 # Usage:
-#   ./build-oasis.sh [--desktop] [BUILD_DIR]    Build from source
-#   ./build-oasis.sh iso [BUILD_DIR]            Create .iso from existing build
+#   ./build-oasis.sh [--desktop] [BUILD_DIR]              Build from source
+#   ./build-oasis.sh --customize [--desktop] [BUILD_DIR]  Generate config files and exit
+#   ./build-oasis.sh iso [BUILD_DIR]                      Create .iso from existing build
 #
 # Options:
-#   --desktop    Include graphical desktop (velox WM, st terminal, netsurf browser)
-#   BUILD_DIR    Where to build (default: ./oasis-linux, next to this script)
+#   --desktop      Include graphical desktop (velox WM, st terminal, netsurf browser)
+#   --customize    Generate editable config files in BUILD_DIR/config/ and exit
+#   BUILD_DIR      Where to build (default: ./oasis-linux, next to this script)
+#
+# --desktop only affects the initial defaults written to config/. Once a config
+# file exists, --desktop is ignored for that file — your edits take precedence.
+# Use --customize --desktop to generate desktop-flavored defaults to edit.
 #
 # The build produces QEMU-ready files. To also get a bootable .iso (for
 # USB sticks, CDs, or other VMs), run the "iso" command afterward:
@@ -34,11 +40,15 @@ set -e
 # Parse flags
 DESKTOP_MODE=false
 ISO_COMMAND=false
+CUSTOMIZE_MODE=false
 BUILD_DIR=""
 for arg in "$@"; do
     case "$arg" in
         --desktop)
             DESKTOP_MODE=true
+            ;;
+        --customize)
+            CUSTOMIZE_MODE=true
             ;;
         iso)
             ISO_COMMAND=true
@@ -57,6 +67,10 @@ KERNEL_VERSION="6.12"
 MUSL_TOOLCHAIN_URL="http://musl.cc/x86_64-linux-musl-cross.tgz"
 OASIS_REPO="https://github.com/oasislinux/oasis.git"
 OASIS_ETC_REPO="https://github.com/oasislinux/etc.git"
+
+# Git network timeouts — abort if transfer drops below 1KB/s for 30 seconds
+export GIT_HTTP_LOW_SPEED_LIMIT=1000
+export GIT_HTTP_LOW_SPEED_TIME=30
 
 # Colors for output
 RED='\033[0;31m'
@@ -94,12 +108,24 @@ check_prerequisites() {
     fi
 
     log_info "All prerequisites found."
+
+    # Check available disk space (need ~10GB)
+    local build_parent
+    build_parent="$(dirname "$BUILD_DIR")"
+    mkdir -p "$build_parent"
+    local avail_kb
+    avail_kb=$(df --output=avail "$build_parent" 2>/dev/null | tail -1)
+    if [ -n "$avail_kb" ] && [ "$avail_kb" -lt 10485760 ]; then
+        local avail_gb=$((avail_kb / 1048576))
+        log_warn "Low disk space: ${avail_gb}GB available, ~10GB recommended."
+        log_warn "Build may fail if disk fills up. Continuing anyway..."
+    fi
 }
 
 # Create build directory structure
 setup_directories() {
     log_info "Setting up build directories in $BUILD_DIR..."
-    mkdir -p "$BUILD_DIR"/{src,toolchain,kernel,rootfs,qemu}
+    mkdir -p "$BUILD_DIR"/{src,toolchain,kernel,rootfs,qemu,config}
 }
 
 # Download and extract musl cross-compiler
@@ -110,7 +136,8 @@ setup_toolchain() {
     fi
 
     log_info "Downloading musl cross-compiler toolchain..."
-    curl -L "$MUSL_TOOLCHAIN_URL" -o "$BUILD_DIR/toolchain/musl-cross.tgz"
+    curl -L --retry 3 --connect-timeout 30 -o "$BUILD_DIR/toolchain/musl-cross.tgz.tmp" "$MUSL_TOOLCHAIN_URL"
+    mv "$BUILD_DIR/toolchain/musl-cross.tgz.tmp" "$BUILD_DIR/toolchain/musl-cross.tgz"
 
     log_info "Extracting toolchain..."
     tar -xzf "$BUILD_DIR/toolchain/musl-cross.tgz" -C "$BUILD_DIR/toolchain"
@@ -150,6 +177,17 @@ init_submodules() {
 
     # Disable GPG signing which can cause timeout issues
     git config --local commit.gpgsign false
+
+    # Pre-clone mtdev if needed — upstream bitmath.org has corrupt pack indices.
+    # Clone from GitHub mirror and create a fetch marker so ninja skips it.
+    if [ -d "pkg/mtdev" ] && [ ! -f "pkg/mtdev/src/configure.ac" ]; then
+        log_info "Pre-cloning mtdev from GitHub mirror (bitmath.org is broken)..."
+        rm -rf "pkg/mtdev/src"
+        GIT_TERMINAL_PROMPT=0 git clone https://github.com/rydberg/mtdev.git "pkg/mtdev/src" 2>/dev/null || true
+        if [ -f "pkg/mtdev/src/configure.ac" ]; then
+            touch "pkg/mtdev/fetch"
+        fi
+    fi
 
     # First pass: try to initialize all submodules
     git submodule update --init --recursive 2>/dev/null || true
@@ -221,18 +259,25 @@ init_submodules() {
     if [ -d "pkg/mtdev" ] && [ ! -f "pkg/mtdev/src/configure.ac" ]; then
         log_warn "Attempting to fix mtdev submodule..."
         rm -rf "pkg/mtdev/src"
-        git clone https://github.com/nicman23/mtdev.git "pkg/mtdev/src" 2>/dev/null || \
-        git clone https://gitlab.freedesktop.org/libevdev/mtdev.git "pkg/mtdev/src" 2>/dev/null || true
+        GIT_TERMINAL_PROMPT=0 git clone https://github.com/rydberg/mtdev.git "pkg/mtdev/src" 2>/dev/null || true
+        if [ -f "pkg/mtdev/src/configure.ac" ]; then
+            touch "pkg/mtdev/fetch"
+        fi
     fi
 }
 
 # Create config.lua with necessary fixes
 create_config() {
-    log_info "Creating config.lua with build fixes..."
+    local config_file="$BUILD_DIR/config/config.lua"
 
-    if [ "$DESKTOP_MODE" = "true" ]; then
-        log_info "Desktop mode enabled - including desktop, extra, and media sets."
-        cat > "$BUILD_DIR/src/oasis/config.lua" << 'EOF'
+    if [ -f "$config_file" ]; then
+        log_info "Using existing config/config.lua"
+    else
+        log_info "Generating default config/config.lua"
+
+        if [ "$DESKTOP_MODE" = "true" ]; then
+            log_info "Desktop mode enabled - including desktop, extra, and media sets."
+            cat > "$config_file" << 'EOF'
 local sets = dofile(basedir..'/sets.lua')
 
 return {
@@ -276,9 +321,9 @@ return {
 	},
 }
 EOF
-    else
-        log_info "Core-only mode (use --desktop for graphical desktop)."
-        cat > "$BUILD_DIR/src/oasis/config.lua" << 'EOF'
+        else
+            log_info "Core-only mode (use --desktop for graphical desktop)."
+            cat > "$config_file" << 'EOF'
 local sets = dofile(basedir..'/sets.lua')
 
 return {
@@ -319,7 +364,10 @@ return {
 	},
 }
 EOF
+        fi
     fi
+
+    cp "$config_file" "$BUILD_DIR/src/oasis/config.lua"
 }
 
 # Fix xz landlock syscall compilation issue
@@ -397,12 +445,12 @@ build_oasis() {
         fi
 
         # Check for submodule-related errors
-        if grep -qE "(No such file or directory|Dirty index|rebase-apply|failed to access)" "$BUILD_DIR/build.log"; then
+        if grep -qE "(No such file or directory|Dirty index|rebase-apply|failed to access|FAILED:.*pkg/.*fetch|Failed to clone)" "$BUILD_DIR/build.log"; then
             log_warn "Build failed due to submodule issue (attempt $((retry+1))/$max_retries)..."
 
             # Extract the problematic package from the ERROR line specifically
             # First, find lines with the error, then extract the package name from those lines
-            local error_line=$(grep -E "(No such file or directory|Dirty index|rebase-apply|failed to access)" "$BUILD_DIR/build.log" | tail -1)
+            local error_line=$(grep -E "(No such file or directory|Dirty index|rebase-apply|failed to access|FAILED:.*pkg/.*fetch|Failed to clone)" "$BUILD_DIR/build.log" | tail -1)
             local pkg=$(echo "$error_line" | grep -oP "pkg/[^/]+" | head -1)
 
             # If not found in error line, try FAILED lines
@@ -450,7 +498,8 @@ build_kernel() {
 
     if [ ! -f "$kernel_tarball" ]; then
         log_info "Downloading Linux kernel $KERNEL_VERSION..."
-        curl -LO "$kernel_url"
+        curl -L --retry 3 --connect-timeout 30 -o "$kernel_tarball.tmp" "$kernel_url"
+        mv "$kernel_tarball.tmp" "$kernel_tarball"
     fi
 
     if [ ! -d "linux-$KERNEL_VERSION" ]; then
@@ -460,9 +509,13 @@ build_kernel() {
 
     cd "linux-$KERNEL_VERSION"
 
-    log_info "Configuring kernel for QEMU/KVM..."
-    make defconfig
-    make kvm_guest.config
+    if [ ! -f ".config" ]; then
+        log_info "Configuring kernel for QEMU/KVM..."
+        make defconfig
+        make kvm_guest.config
+    else
+        log_info "Kernel already configured, skipping defconfig."
+    fi
 
     log_info "Building kernel (this will take a while)..."
     make -j$(nproc)
@@ -475,8 +528,6 @@ build_kernel() {
 create_rootfs() {
     cd "$BUILD_DIR/rootfs"
 
-    log_info "Extracting root filesystem from build..."
-
     # Get the tree hash from the build output
     local tree_hash=$(cat "$BUILD_DIR/src/oasis/out/root.tree" 2>/dev/null)
 
@@ -484,6 +535,22 @@ create_rootfs() {
         log_error "Could not find root.tree - build may not have completed successfully"
         exit 1
     fi
+
+    # Check if initramfs is already up to date (same tree hash + init script)
+    local init_config="$BUILD_DIR/config/init"
+    local hash_file="$BUILD_DIR/rootfs/.built_hash"
+    local current_hash="$tree_hash"
+    # Include init script in hash so edits to config/init trigger a rebuild
+    if [ -f "$init_config" ]; then
+        current_hash="${tree_hash}_$(md5sum "$init_config" | cut -d' ' -f1)"
+    fi
+
+    if [ -f "$BUILD_DIR/qemu/initramfs.img.gz" ] && [ -f "$hash_file" ] && [ "$(cat "$hash_file")" = "$current_hash" ]; then
+        log_info "Initramfs already up to date, skipping."
+        return
+    fi
+
+    log_info "Extracting root filesystem from build..."
 
     # Clone the bare git repository
     rm -rf root.git
@@ -507,8 +574,14 @@ create_rootfs() {
     fi
     mkdir -p etc
 
-    # Create init script for initramfs boot
-    cat > init << 'INIT_EOF'
+    # Use persistent init from config/ or generate default
+    local init_config="$BUILD_DIR/config/init"
+
+    if [ -f "$init_config" ]; then
+        log_info "Using existing config/init"
+    else
+        log_info "Generating default config/init"
+        cat > "$init_config" << 'INIT_EOF'
 #!/bin/sh
 
 # Mount essential filesystems
@@ -571,17 +644,29 @@ echo "Powering off..."
 sync
 halt -p
 INIT_EOF
+        chmod +x "$init_config"
+    fi
+
+    cp "$init_config" init
     chmod +x init
 
     log_info "Creating initramfs..."
     find . | cpio -o -H newc | gzip > "$BUILD_DIR/qemu/initramfs.img.gz"
+
+    # Record what we built so we can skip next time if nothing changed
+    echo "$current_hash" > "$BUILD_DIR/rootfs/.built_hash"
 }
 
 # Create QEMU launch script
 create_qemu_script() {
-    log_info "Creating QEMU launch script..."
+    local run_config="$BUILD_DIR/config/run"
 
-    cat > "$BUILD_DIR/qemu/run" << 'QEMU_EOF'
+    if [ -f "$run_config" ]; then
+        log_info "Using existing config/run"
+    else
+        log_info "Generating default config/run"
+
+        cat > "$run_config" << 'QEMU_EOF'
 #!/bin/sh
 
 # Oasis Linux QEMU launcher script
@@ -665,6 +750,10 @@ case "$MODE" in
 esac
 QEMU_EOF
 
+        chmod +x "$run_config"
+    fi
+
+    cp "$run_config" "$BUILD_DIR/qemu/run"
     chmod +x "$BUILD_DIR/qemu/run"
 }
 
@@ -757,20 +846,30 @@ create_iso() {
     cp /usr/lib/ISOLINUX/isolinux.bin "$iso_dir/boot/isolinux/"
     cp /usr/lib/syslinux/modules/bios/ldlinux.c32 "$iso_dir/boot/isolinux/"
 
-    # Create isolinux config
-    if [ "$DESKTOP_MODE" = "true" ]; then
-        local append_desktop="oasis.desktop"
-    else
-        local append_desktop=""
-    fi
+    # Use persistent isolinux.cfg from config/ or generate default
+    local iso_config="$BUILD_DIR/config/isolinux.cfg"
 
-    cat > "$iso_dir/boot/isolinux/isolinux.cfg" << ISOCFG
+    if [ -f "$iso_config" ]; then
+        log_info "Using existing config/isolinux.cfg"
+    else
+        log_info "Generating default config/isolinux.cfg"
+
+        if [ "$DESKTOP_MODE" = "true" ]; then
+            local append_desktop="oasis.desktop"
+        else
+            local append_desktop=""
+        fi
+
+        cat > "$iso_config" << ISOCFG
 DEFAULT oasis
 LABEL oasis
     KERNEL /boot/bzImage
     INITRD /boot/initramfs.img.gz
     APPEND rdinit=/init $append_desktop
 ISOCFG
+    fi
+
+    cp "$iso_config" "$iso_dir/boot/isolinux/isolinux.cfg"
 
     # Build the ISO (hybrid: boots from both CD and USB)
     local iso_out="$BUILD_DIR/oasis-linux.iso"
@@ -788,11 +887,143 @@ ISOCFG
     log_info "ISO created: $iso_out ($iso_size)"
 }
 
+# Generate all config files (used by --customize and normal builds)
+generate_config_files() {
+    create_config
+    create_qemu_script
+    # create_rootfs generates config/init but needs a full build first,
+    # so for --customize we generate the init default directly
+    if [ ! -f "$BUILD_DIR/config/init" ]; then
+        log_info "Generating default config/init"
+        cat > "$BUILD_DIR/config/init" << 'INIT_EOF'
+#!/bin/sh
+
+# Mount essential filesystems
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+
+# Create device nodes if they don't exist
+mknod -m 666 /dev/null c 1 3 2>/dev/null
+mknod -m 666 /dev/zero c 1 5 2>/dev/null
+mknod -m 666 /dev/console c 5 1 2>/dev/null
+mknod -m 666 /dev/tty c 5 0 2>/dev/null
+
+# Set up basic environment
+export PATH=/bin:/usr/bin:/libexec/velox
+export HOME=/root
+export TERM=linux
+
+# Check kernel command line for desktop mode
+DESKTOP=false
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        oasis.desktop) DESKTOP=true ;;
+    esac
+done
+
+if [ "$DESKTOP" = "true" ] && [ -x /bin/velox ]; then
+    # Set up Wayland environment
+    export XDG_RUNTIME_DIR=/run/user
+    mkdir -p "$XDG_RUNTIME_DIR"
+
+    # Copy velox config if available
+    mkdir -p /root
+    if [ -f /share/doc/velox/velox.conf.sample ] && [ ! -f /root/velox.conf ]; then
+        cp /share/doc/velox/velox.conf.sample /root/velox.conf
+    fi
+
+    echo "Starting Oasis desktop (velox)..."
+    echo "  Mod+Shift+Return = terminal"
+    echo "  Mod+r            = run menu"
+    echo "  Mod+b            = browser"
+    echo "  Mod+Shift+q      = quit"
+    echo ""
+
+    # Launch velox via swc-launch (handles DRM access)
+    swc-launch velox
+else
+    # Console mode - start a shell
+    echo ""
+    echo "Welcome to Oasis Linux"
+    echo "Type 'exit' to power off."
+    echo ""
+    /bin/ksh -l
+fi
+
+# Clean shutdown
+echo "Powering off..."
+sync
+halt -p
+INIT_EOF
+        chmod +x "$BUILD_DIR/config/init"
+    else
+        log_info "Using existing config/init"
+    fi
+    # isolinux.cfg
+    if [ ! -f "$BUILD_DIR/config/isolinux.cfg" ]; then
+        log_info "Generating default config/isolinux.cfg"
+
+        if [ "$DESKTOP_MODE" = "true" ]; then
+            local append_desktop="oasis.desktop"
+        else
+            local append_desktop=""
+        fi
+
+        cat > "$BUILD_DIR/config/isolinux.cfg" << ISOCFG
+DEFAULT oasis
+LABEL oasis
+    KERNEL /boot/bzImage
+    INITRD /boot/initramfs.img.gz
+    APPEND rdinit=/init $append_desktop
+ISOCFG
+    else
+        log_info "Using existing config/isolinux.cfg"
+    fi
+}
+
 # Main build process
 main() {
     # Handle "iso" as a standalone command
     if [ "$ISO_COMMAND" = "true" ]; then
         create_iso
+        return
+    fi
+
+    # Handle --customize: generate config files and exit
+    if [ "$CUSTOMIZE_MODE" = "true" ]; then
+        log_info "============================================"
+        log_info "Generating config files for customization..."
+        log_info "Build directory: $BUILD_DIR"
+        log_info "============================================"
+
+        setup_directories
+        clone_oasis
+        generate_config_files
+
+        log_info "============================================"
+        log_info "Config files generated in $BUILD_DIR/config/"
+        log_info ""
+        log_info "Edit any of these before building:"
+        log_info "  config/config.lua    - Package sets, compiler flags"
+        log_info "  config/init          - Init script (runs at boot)"
+        log_info "  config/run           - QEMU launch script"
+        log_info "  config/isolinux.cfg  - ISO bootloader config"
+        log_info ""
+        if [ "$DESKTOP_MODE" = "true" ]; then
+            log_info "Defaults were generated for desktop mode."
+        else
+            log_info "Defaults were generated for core mode."
+            log_info "For desktop defaults, delete config/ and rerun with --customize --desktop"
+        fi
+        log_info ""
+        log_info "Once config files exist, --desktop is ignored — your edits take precedence."
+        log_info ""
+        log_info "Then build with:"
+        log_info "  ./build-oasis.sh"
+        log_info "============================================"
         return
     fi
 
@@ -831,6 +1062,9 @@ main() {
     log_info ""
     log_info "To create a bootable ISO (for USB sticks, CDs, other VMs):"
     log_info "  ./build-oasis.sh iso"
+    log_info ""
+    log_info "To customize config files for future builds:"
+    log_info "  Edit files in $BUILD_DIR/config/"
     log_info ""
     log_info "Files created:"
     log_info "  $BUILD_DIR/qemu/bzImage          - Linux kernel"
