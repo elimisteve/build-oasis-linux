@@ -119,6 +119,35 @@ nano oasis-linux/config/config.lua            # edit what you want
 ```
 
 
+## Reproducible Builds
+
+Builds are reproducible by default. Two builds from the same source will
+produce identical images — no extra configuration needed.
+
+```bash
+./build-oasis.sh                  # reproducible out of the box
+sha256sum oasis-linux/qemu/bzImage oasis-linux/qemu/initramfs.img.gz
+```
+
+Expected checksums:
+
+```
+sha256  bzImage:          75e2c074645df3bf49ef638be15d8e810e129548be66c547f008b41a17ccaf4a
+sha256  initramfs.img.gz: ef740437788c0c78df9dc0218d50514152a3f00e1bad594f6e42fb9b14ddc878
+```
+
+To embed a specific timestamp, set `SOURCE_DATE_EPOCH` before building:
+
+```bash
+export SOURCE_DATE_EPOCH=$(date -d '2026-03-03' +%s)
+./build-oasis.sh
+```
+
+Under the hood, this clamps all file timestamps, sorts the initramfs file list,
+normalizes cpio inode/device numbers, strips the gzip timestamp, and sets fixed
+kernel build metadata.
+
+
 ## Build Fixes Applied Automatically
 
 The Oasis build has several issues when building from a fresh clone. This script handles all of them:

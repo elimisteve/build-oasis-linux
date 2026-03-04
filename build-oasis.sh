@@ -22,6 +22,9 @@
 # file exists, --desktop is ignored for that file — your edits take precedence.
 # Use --customize --desktop to generate desktop-flavored defaults to edit.
 #
+# Builds are reproducible by default. Set SOURCE_DATE_EPOCH to override
+# the embedded timestamp (default: epoch 0 = 1970-01-01).
+#
 # The build produces QEMU-ready files. To also get a bootable .iso (for
 # USB sticks, CDs, or other VMs), run the "iso" command afterward:
 #
@@ -61,6 +64,13 @@ done
 # Default to ./oasis-linux next to this script
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/oasis-linux}"
+
+# Reproducible builds: builds are reproducible by default.
+# Override SOURCE_DATE_EPOCH to change the embedded timestamp (default: 0).
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
+export KBUILD_BUILD_TIMESTAMP="$(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%d')"
+export KBUILD_BUILD_HOST="oasis"
+export KBUILD_BUILD_USER="oasis"
 
 # Configuration
 KERNEL_VERSION="6.12"
@@ -650,8 +660,14 @@ INIT_EOF
     cp "$init_config" init
     chmod +x init
 
+    # Clamp file timestamps for reproducible builds
+    find . -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} + 2>/dev/null || true
+
     log_info "Creating initramfs..."
-    find . | cpio -o -H newc | gzip > "$BUILD_DIR/qemu/initramfs.img.gz"
+    # Reproducible: sorted file list, stable inodes/devnos, clamped timestamps, no gzip timestamp
+    find . -print0 | LC_ALL=C sort -z | \
+        cpio --null --reproducible -o -H newc | \
+        gzip -n > "$BUILD_DIR/qemu/initramfs.img.gz"
 
     # Record what we built so we can skip next time if nothing changed
     echo "$current_hash" > "$BUILD_DIR/rootfs/.built_hash"
